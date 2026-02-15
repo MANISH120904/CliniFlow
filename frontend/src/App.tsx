@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  Container, Typography, TextField, Button, Paper, Box, 
+import {
+  Container, Typography, TextField, Button, Paper, Box,
   CircularProgress, Alert, Card, CardContent, Divider, Chip, IconButton, Tooltip,
   ThemeProvider, createTheme, CssBaseline, Drawer, List, ListItem, ListItemButton, ListItemIcon, ListItemText,
-  Accordion, AccordionSummary, AccordionDetails
+  Accordion, AccordionSummary, AccordionDetails, Grid, Avatar
 } from '@mui/material';
-import Grid from '@mui/material/Grid';
+import { keyframes } from '@mui/system';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import MedicalInformationIcon from '@mui/icons-material/MedicalInformation';
@@ -20,11 +20,19 @@ import AnalyticsIcon from '@mui/icons-material/Analytics';
 import PersonIcon from '@mui/icons-material/Person';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
+import SearchIcon from '@mui/icons-material/Search';
+import ChatIcon from '@mui/icons-material/Chat';
+import CloseIcon from '@mui/icons-material/Close';
+import SendIcon from '@mui/icons-material/Send';
+import SmartToyIcon from '@mui/icons-material/SmartToy';
+import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import { useAuthState } from "react-firebase-hooks/auth";
 import { auth, googleProvider, db } from "./firebase";
 import { collection, addDoc, query, where, getDocs, orderBy, Timestamp } from "firebase/firestore";
-import { 
+import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip, ResponsiveContainer, Legend
 } from 'recharts';
 
@@ -50,6 +58,10 @@ const theme = createTheme({
   components: {
     MuiCssBaseline: {
       styleOverrides: `
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
         body {
           background-color: #F0F4F8;
           background-image: url("https://www.transparenttextures.com/patterns/cubes.png"), linear-gradient(135deg, #F0F7F7 0%, #E0E8E8 100%);
@@ -65,6 +77,17 @@ const theme = createTheme({
     },
   },
 });
+
+// API Constants
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_ENDPOINTS = {
+  extractDocument: `${API_BASE_URL}/extract-from-document`,
+  processVoice: `${API_BASE_URL}/process-voice`,
+  triage: `${API_BASE_URL}/triage`,
+  searchHospitals: `${API_BASE_URL}/search-hospitals`,
+  sendIntake: `${API_BASE_URL}/send-intake`,
+  chat: `${API_BASE_URL}/chat`,
+};
 
 interface TriageResult {
   risk_level: string;
@@ -452,8 +475,70 @@ function App() {
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [transmitting, setTransmitting] = useState(false);
   const [transmissionReceipt, setTransmissionReceipt] = useState<any>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessage, setChatMessage] = useState('');
+  const [chatHistory, setChatHistory] = useState<{ role: string, content: string }[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<any>(null);
   const audioChunksRef = useRef<any>([]);
+  const reportRef = useRef<HTMLDivElement>(null);
+
+  const handleExportPDF = async () => {
+    if (!reportRef.current) return;
+    try {
+      const canvas = await html2canvas(reportRef.current, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#FFFFFF'
+      });
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`Triage_Report_${formData.patient_id || 'unnamed'}.pdf`);
+    } catch (err) {
+      console.error('PDF Export Error:', err);
+      setError('Failed to generate PDF.');
+    }
+  };
+
+  const scrollToBottom = () => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    if (chatOpen) scrollToBottom();
+  }, [chatHistory, chatOpen]);
+
+  const handleChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatMessage.trim()) return;
+
+    const userMsg = chatMessage;
+    setChatMessage('');
+    setChatHistory(prev => [...prev, { role: 'user', content: userMsg }]);
+    setChatLoading(true);
+
+    try {
+      const response = await axios.post(API_ENDPOINTS.chat, {
+        message: userMsg,
+        context: {
+          patient_data: formData,
+          triage_result: result
+        }
+      });
+      setChatHistory(prev => [...prev, { role: 'assistant', content: response.data.response }]);
+    } catch (err) {
+      setChatHistory(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
 
   const navItems = [
     { id: 'triage', label: 'Dashboard', icon: <DashboardIcon /> },
@@ -474,7 +559,7 @@ function App() {
     if (!e.target.files?.[0]) return;
     setProcessingType('doc'); setError(null);
     const uploadData = new FormData(); uploadData.append('file', e.target.files[0]);
-    try { const response = await axios.post('http://localhost:8000/extract-from-document', uploadData); setFormData(prev => ({ ...prev, ...response.data })); } 
+    try { const response = await axios.post(API_ENDPOINTS.extractDocument, uploadData); setFormData(prev => ({ ...prev, ...response.data })); } 
     catch (err) { setError('Extraction failed.'); } finally { setProcessingType(null); }
   };
 
@@ -484,9 +569,11 @@ function App() {
       mediaRecorderRef.current = new MediaRecorder(stream); audioChunksRef.current = [];
       mediaRecorderRef.current.ondataavailable = (e: any) => audioChunksRef.current.push(e.data);
       mediaRecorderRef.current.onstop = async () => {
-        const voiceData = new FormData(); voiceData.append('file', new Blob(audioChunksRef.current), 'v.webm');
+        const voiceData = new FormData(); 
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        voiceData.append('file', audioBlob, 'v.webm');
         setProcessingType('voice');
-        try { const response = await axios.post('http://localhost:8000/process-voice', voiceData); setFormData(prev => ({ ...prev, ...response.data })); } 
+        try { const response = await axios.post(API_ENDPOINTS.processVoice, voiceData); setFormData(prev => ({ ...prev, ...response.data })); } 
         catch (err) { setError('Voice processing failed.'); } finally { setProcessingType(null); }
       };
       mediaRecorderRef.current.start(); setRecording(true);
@@ -497,7 +584,7 @@ function App() {
     e.preventDefault(); setLoading(true); setError(null); setResult(null);
     try {
       const sanitized = sanitize(formData);
-      const response = await axios.post('http://localhost:8000/triage', sanitized);
+      const response = await axios.post(API_ENDPOINTS.triage, sanitized);
       setResult(response.data);
       if (user) { await addDoc(collection(db, "triage_history"), { userId: user.uid, userEmail: user.email, timestamp: Timestamp.now(), patientData: formData, result: response.data }); }
     } catch (err: any) { setError('Analysis failed.'); } finally { setLoading(false); }
@@ -505,7 +592,7 @@ function App() {
 
   const handleSearchHospitals = async () => {
     if (!zipcode) return; setSearching(true);
-    try { const response = await axios.post('http://localhost:8000/search-hospitals', null, { params: { zipcode } }); setHospitals(response.data.hospitals); } 
+    try { const response = await axios.post(API_ENDPOINTS.searchHospitals, null, { params: { zipcode } }); setHospitals(response.data.hospitals); } 
     catch (err) { setError('Search failed.'); } finally { setSearching(false); }
   };
 
@@ -513,7 +600,7 @@ function App() {
     if (!permissionGranted) return; setTransmitting(true);
     try {
       const hName = hospitals?.split('\n')[0].replace(/[*#-]/g, '').trim() || "Nearby Medical Center";
-      const response = await axios.post('http://localhost:8000/send-intake', sanitize(formData), { params: { hospital_name: hName } });
+      const response = await axios.post(API_ENDPOINTS.sendIntake, sanitize(formData), { params: { hospital_name: hName } });
       setTransmissionReceipt({ id: response.data.transmission_id, msg: response.data.message });
     } catch (err) { setError('Notify failed.'); } finally { setTransmitting(false); }
   };
@@ -608,7 +695,18 @@ function App() {
                 {result && (
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                     {result.emergency_action && <Alert severity="error" variant="filled" sx={{ borderRadius: 3, fontWeight: 'bold', animation: 'pulse 2s infinite' }}>{result.emergency_action}</Alert>}
-                    <Card elevation={4} sx={{ borderRadius: 3, overflow: 'hidden' }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Button 
+                        variant="outlined" 
+                        size="small" 
+                        startIcon={<PictureAsPdfIcon />} 
+                        onClick={handleExportPDF}
+                        sx={{ textTransform: 'none', borderRadius: 2, fontWeight: 700 }}
+                      >
+                        Export as PDF
+                      </Button>
+                    </Box>
+                    <Card elevation={4} sx={{ borderRadius: 3, overflow: 'hidden' }} ref={reportRef}>
                       <Box sx={{ bgcolor: (theme.palette as any)[getRiskColor(result.risk_level || 'Low')]?.main || '#21473E', height: 8 }} />
                       <CardContent sx={{ p: 4 }}>
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
@@ -661,6 +759,182 @@ function App() {
           )}
         </Box>
       </Box>
+
+      {/* Clinical Sidekick FAB */}
+      <Tooltip title="Clinical Sidekick Chat" placement="left">
+        <Button
+          variant="contained"
+          onClick={() => setChatOpen(true)}
+          sx={{
+            position: 'fixed', bottom: 30, right: 30,
+            width: 70, height: 70, borderRadius: '50%',
+            bgcolor: '#1A3A5F',
+            color: 'white',
+            boxShadow: '0 8px 32px rgba(10, 46, 80, 0.3)',
+            zIndex: 1000,
+            '&:hover': { bgcolor: '#0A2E50', transform: 'scale(1.1) rotate(5deg)' },
+            transition: 'all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+          }}
+        >
+          <ChatIcon sx={{ fontSize: 32 }} />
+        </Button>
+      </Tooltip>
+
+      {/* Clinical Sidekick Sidebar */}
+      <Drawer
+        anchor="right"
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        sx={{
+          '& .MuiDrawer-paper': { 
+            width: { xs: '100%', sm: 420 }, 
+            bgcolor: '#F0F4F8', 
+            borderLeft: 'none', 
+            boxShadow: '-10px 0 30px rgba(0,0,0,0.15)',
+            overflow: 'hidden'
+          }
+        }}
+      >
+        <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          {/* Header */}
+          <Box sx={{ 
+            p: 3, 
+            bgcolor: '#0A2E50', 
+            color: 'white', 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'space-between',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
+          }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <Avatar sx={{ bgcolor: '#2C5282', color: 'white' }}>
+                <SmartToyIcon />
+              </Avatar>
+              <Box>
+                <Typography variant="subtitle1" sx={{ fontWeight: 800, lineHeight: 1.2, letterSpacing: '0.02em' }}>
+                  Clinical Sidekick
+                </Typography>
+                <Typography variant="caption" sx={{ opacity: 0.9, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Box component="span" sx={{ width: 8, height: 8, bgcolor: '#63B3ED', borderRadius: '50%', display: 'inline-block' }} />
+                  Deep Blue AI Assistant
+                </Typography>
+              </Box>
+            </Box>
+            <IconButton onClick={() => setChatOpen(false)} sx={{ color: 'white', '&:hover': { bgcolor: 'rgba(255,255,255,0.1)' } }}>
+              <CloseIcon />
+            </IconButton>
+          </Box>
+
+          {/* Messages */}
+          <Box sx={{ 
+            flexGrow: 1, 
+            p: 3, 
+            overflowY: 'auto', 
+            display: 'flex', 
+            flexDirection: 'column', 
+            gap: 2.5,
+            background: 'linear-gradient(180deg, #E2E8F0 0%, #F7FAFC 100%)'
+          }}>
+            {chatHistory.length === 0 && (
+              <Box sx={{ textAlign: 'center', mt: 8, px: 4 }}>
+                <Avatar sx={{ width: 64, height: 64, mx: 'auto', mb: 2, bgcolor: 'rgba(10, 46, 80, 0.05)', color: '#0A2E50' }}>
+                  <SmartToyIcon sx={{ fontSize: 32 }} />
+                </Avatar>
+                <Typography variant="h6" sx={{ fontWeight: 700, color: '#0A2E50', mb: 1 }}>Deep Blue Assistance</Typography>
+                <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.6 }}>
+                  I'm ready to analyze patient data with clinical precision. How can I assist you today?
+                </Typography>
+              </Box>
+            )}
+            {chatHistory.map((msg, i) => (
+              <Box
+                key={i}
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <Box
+                  sx={{
+                    maxWidth: '88%',
+                    p: 2,
+                    borderRadius: msg.role === 'user' ? '20px 20px 4px 20px' : '20px 20px 20px 4px',
+                    bgcolor: msg.role === 'user' ? '#2C5282' : 'white',
+                    color: msg.role === 'user' ? 'white' : 'text.primary',
+                    boxShadow: msg.role === 'user' ? '0 4px 12px rgba(44, 82, 130, 0.2)' : '0 4px 12px rgba(0,0,0,0.05)',
+                    border: msg.role === 'user' ? 'none' : '1px solid #E2E8F0',
+                  }}
+                >
+                  <Typography variant="body2" component="div" sx={{ 
+                    lineHeight: 1.6,
+                    '& p': { m: 0 },
+                    '& ul, & ol': { pl: 2, m: 0 }
+                  }}>
+                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  </Typography>
+                </Box>
+                <Typography variant="caption" sx={{ mt: 0.5, px: 1, opacity: 0.6, fontSize: '0.7rem', fontWeight: 600, color: '#4A5568' }}>
+                  {msg.role === 'user' ? 'YOU' : 'SIDEKICK'}
+                </Typography>
+              </Box>
+            ))}
+            {chatLoading && (
+              <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
+                <Avatar sx={{ width: 28, height: 28, bgcolor: '#2C5282', color: 'white' }}>
+                  <CircularProgress size={14} color="inherit" />
+                </Avatar>
+                <Box sx={{ bgcolor: 'white', px: 2, py: 1, borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)', border: '1px solid #E2E8F0' }}>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: '#4A5568', animation: 'pulse 1.5s infinite' }}>
+                    Analyzing clinical context...
+                  </Typography>
+                </Box>
+              </Box>
+            )}
+            <div ref={chatEndRef} />
+          </Box>
+
+          {/* Input */}
+          <Box sx={{ p: 3, bgcolor: 'white', borderTop: '1px solid #E2E8F0' }}>
+            <form onSubmit={handleChat}>
+              <TextField
+                fullWidth
+                placeholder="Ask about patient vitals or logic..."
+                value={chatMessage}
+                onChange={(e) => setChatMessage(e.target.value)}
+                autoComplete="off"
+                disabled={chatLoading}
+                variant="outlined"
+                sx={{
+                  '& .MuiOutlinedInput-root': {
+                    borderRadius: '12px',
+                    bgcolor: '#F7FAFC',
+                    '& fieldset': { borderColor: '#E2E8F0' },
+                    '&:hover fieldset': { borderColor: '#2C5282' },
+                    '&.Mui-focused fieldset': { borderColor: '#2C5282', borderWidth: '2px' }
+                  }
+                }}
+                InputProps={{
+                  endAdornment: (
+                    <IconButton 
+                      type="submit" 
+                      disabled={!chatMessage.trim() || chatLoading} 
+                      sx={{ 
+                        bgcolor: chatMessage.trim() ? '#2C5282' : 'transparent',
+                        color: chatMessage.trim() ? 'white' : 'inherit',
+                        '&:hover': { bgcolor: '#1A3A5F', color: 'white' },
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      <SendIcon fontSize="small" />
+                    </IconButton>
+                  )
+                }}
+              />
+            </form>
+          </Box>
+        </Box>
+      </Drawer>
     </ThemeProvider>
   );
 }

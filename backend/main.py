@@ -38,9 +38,6 @@ if not os.path.exists(MODEL_PATH):
 with open(MODEL_PATH, "rb") as f:
     ml_model = pickle.load(f)
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-# ... (rest of imports)
-
 class PatientData(BaseModel):
     patient_id: Optional[str] = ""
     age: Optional[int] = None
@@ -51,6 +48,10 @@ class PatientData(BaseModel):
     systolic_bp: Optional[int] = None
     diastolic_bp: Optional[int] = None
     pre_existing: Optional[str] = ""
+
+class ChatRequest(BaseModel):
+    message: str
+    context: Optional[dict] = None
 
 def calculate_news2_score(data: PatientData):
     """Simplified NEWS2 (excluding respiratory parameters)."""
@@ -80,6 +81,13 @@ async def extract_from_document(file: UploadFile = File(...)):
     """Extracts patient metadata from uploaded EHR or EMR documents."""
     content = await file.read()
     
+    mime_type = file.content_type
+    if mime_type == "application/octet-stream":
+        if file.filename.endswith('.pdf'): mime_type = 'application/pdf'
+        elif file.filename.endswith('.png'): mime_type = 'image/png'
+        elif file.filename.endswith(('.jpg', '.jpeg')): mime_type = 'image/jpeg'
+        else: mime_type = 'text/plain'
+
     prompt = """
     You are a medical data extraction expert. Analyze the provided file (EHR/EMR document).
     Identify risk signals, medical history, diagnoses, medications, and abnormal vitals.
@@ -93,7 +101,7 @@ async def extract_from_document(file: UploadFile = File(...)):
     - temp (float, Celsius)
     - systolic_bp (integer)
     - diastolic_bp (integer)
-    - pre_existing_conditions (List of historical diagnoses/medications)
+    - pre_existing (string, comma-separated list of historical diagnoses/medications)
     
     CRITICAL: If the document is an EMR/EHR, prioritize 'Abnormal Values' and 'Recent Observations'.
     Return ONLY the valid JSON object. If a value is missing or unidentifiable, return null for that field.
@@ -104,7 +112,7 @@ async def extract_from_document(file: UploadFile = File(...)):
             model=GEMINI_MODEL,
             contents=[
                 prompt,
-                types.Part.from_bytes(data=content, mime_type=file.content_type)
+                types.Part.from_bytes(data=content, mime_type=mime_type)
             ]
         )
         import json
@@ -123,6 +131,10 @@ async def process_voice(file: UploadFile = File(...)):
     """Converts speech to text and extracts structured patient features from audio."""
     content = await file.read()
     
+    mime_type = file.content_type
+    if mime_type == "application/octet-stream":
+        mime_type = "audio/webm"
+
     prompt = """
     You are a medical scribe. Analyze the audio of a patient intake.
     Extract the following fields into a FLAT JSON object. 
@@ -137,7 +149,7 @@ async def process_voice(file: UploadFile = File(...)):
     - temp: float or null (e.g., 37.5)
     - systolic_bp: integer or null (e.g., 120)
     - diastolic_bp: integer or null (e.g., 80)
-    - pre_existing_conditions: ONLY past medical history (e.g., Diabetes, Hypertension).
+    - pre_existing: ONLY past medical history (e.g., Diabetes, Hypertension).
     
     Rules:
     1. If a value is not mentioned, set it to null.
@@ -150,7 +162,7 @@ async def process_voice(file: UploadFile = File(...)):
             model=GEMINI_MODEL,
             contents=[
                 prompt,
-                types.Part.from_bytes(data=content, mime_type=file.content_type)
+                types.Part.from_bytes(data=content, mime_type=mime_type)
             ]
         )
         import json
@@ -328,6 +340,37 @@ async def send_intake(hospital_name: str, data: PatientData):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail="Transmission failed")
+
+@app.post("/chat")
+async def clinical_chat(request: ChatRequest):
+    """Context-aware clinical sidekick chat."""
+    try:
+        system_prompt = """
+        You are the 'Clinical Sidekick', an AI assistant integrated into a healthcare triage system.
+        Your goal is to help clinicians interpret triage results and provide additional clinical context.
+        
+        Guidelines:
+        1. Be professional, concise, and clinically focused.
+        2. Use the provided patient data and triage results to give specific answers.
+        3. If asked for medical advice, always include a disclaimer that you are an AI assistant and not a replacement for clinical judgment.
+        4. If the patient is 'High' risk, prioritize urgency in your tone.
+        """
+        
+        context_str = ""
+        if request.context:
+            context_str = f"\n\nContext:\n{request.context}"
+        
+        full_prompt = f"{system_prompt}{context_str}\n\nUser Message: {request.message}\n\nAssistant Response:"
+        
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=full_prompt
+        )
+        
+        return {"response": response.text.strip()}
+    except Exception as e:
+        print(f"Chat Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
